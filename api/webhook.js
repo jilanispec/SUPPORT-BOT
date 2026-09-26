@@ -1,182 +1,377 @@
+import { createClient } from "@supabase/supabase-js";
+
 const BOT_TOKEN = process.env.BOT_TOKEN;
 
-const OWNER_ID = Number(process.env.OWNER_ID || 2079655933);
+const OWNER_ID = Number(
+  process.env.OWNER_ID || "2079655933"
+);
 
 const ADMIN_IDS = (process.env.ADMIN_IDS || "2079655933,7598304720")
   .split(",")
-  .map(id => Number(id.trim()))
+  .map((id) => Number(id.trim()))
   .filter(Boolean);
 
-const API = `https://api.telegram.org/bot${BOT_TOKEN}`;
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SECRET_KEY = process.env.SUPABASE_SECRET_KEY;
 
-
-// ======================================================
-// TEMPORARY STORAGE
-// ======================================================
-// NOTE:
-// Vercel can restart serverless instances, so this data
-// can reset. After testing everything, we can connect a
-// persistent database without changing the bot's UI.
-// ======================================================
-
-globalThis.supportBotState ??= {
-  users: new Map(),
-  groups: new Map(),
-
-  messages: 0,
-  adminReplies: 0,
-
-  broadcasts: 0,
-  broadcastSent: 0,
-  broadcastFailed: 0,
-
-  // adminChatId:forwardedMessageId -> original user ID
-  messageMap: new Map()
-};
-
-const state = globalThis.supportBotState;
-
-
-// ======================================================
-// TELEGRAM API
-// ======================================================
-
-async function telegram(method, data = {}) {
-
-  if (!BOT_TOKEN) {
-    throw new Error("BOT_TOKEN environment variable is missing");
-  }
-
-  const response = await fetch(`${API}/${method}`, {
-    method: "POST",
-
-    headers: {
-      "Content-Type": "application/json"
-    },
-
-    body: JSON.stringify(data)
-  });
-
-  const result = await response.json();
-
-  if (!result.ok) {
-    console.error(`Telegram ${method} error:`, result);
-  }
-
-  return result;
+if (!BOT_TOKEN) {
+  throw new Error("BOT_TOKEN is missing");
 }
 
+if (!SUPABASE_URL) {
+  throw new Error("SUPABASE_URL is missing");
+}
 
-// ======================================================
-// HELPERS
-// ======================================================
+if (!SUPABASE_SECRET_KEY) {
+  throw new Error("SUPABASE_SECRET_KEY is missing");
+}
+
+/*
+ * SERVER-ONLY Supabase client.
+ * Never expose SUPABASE_SECRET_KEY to users/browser.
+ */
+const supabase = createClient(
+  SUPABASE_URL,
+  SUPABASE_SECRET_KEY,
+  {
+    auth: {
+      autoRefreshToken: false,
+      persistSession: false,
+      detectSessionInUrl: false
+    }
+  }
+);
+
+const TELEGRAM_API =
+  `https://api.telegram.org/bot${BOT_TOKEN}`;
+
+/* =====================================================
+   ADMIN NAMES
+===================================================== */
+
+const ADMIN_NAMES = {
+  2079655933: "JILAN",
+  7598304720: "ADMIN"
+};
+
+function getAdminName(adminId) {
+  return ADMIN_NAMES[Number(adminId)] || "ADMIN";
+}
 
 function isAdmin(userId) {
   return ADMIN_IDS.includes(Number(userId));
 }
 
+/* =====================================================
+   TELEGRAM API
+===================================================== */
 
-function getUserName(user) {
-
-  if (user?.username) {
-    return user.username;
-  }
-
-  const fullName = [
-    user?.first_name,
-    user?.last_name
-  ]
-    .filter(Boolean)
-    .join(" ");
-
-  return fullName || String(user?.id || "Unknown");
-}
-
-
-function getAdminName(user) {
-
-  const fullName = [
-    user?.first_name,
-    user?.last_name
-  ]
-    .filter(Boolean)
-    .join(" ");
-
-  return (
-    fullName ||
-    user?.username ||
-    String(user?.id || "Admin")
+async function telegram(method, body = {}) {
+  const response = await fetch(
+    `${TELEGRAM_API}/${method}`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(body)
+    }
   );
+
+  const data = await response.json();
+
+  if (!data.ok) {
+    console.error(
+      `Telegram ${method} failed:`,
+      data
+    );
+  }
+
+  return data;
 }
 
+/* =====================================================
+   SUPABASE - USERS
+===================================================== */
 
-function saveUser(user) {
+async function saveUser(user) {
+  const { error } = await supabase
+    .from("users")
+    .upsert(
+      {
+        user_id: Number(user.id),
+        first_name: user.first_name || "",
+        username: user.username || null,
+        updated_at: new Date().toISOString()
+      },
+      {
+        onConflict: "user_id"
+      }
+    );
 
-  if (!user?.id) {
+  if (error) {
+    console.error("saveUser:", error);
+  }
+}
+
+async function userExists(userId) {
+  const { data, error } = await supabase
+    .from("users")
+    .select("user_id")
+    .eq("user_id", Number(userId))
+    .limit(1);
+
+  if (error) {
+    console.error("userExists:", error);
+    return false;
+  }
+
+  return Array.isArray(data) && data.length > 0;
+}
+
+async function getUsers() {
+  const { data, error } = await supabase
+    .from("users")
+    .select("user_id, first_name, username")
+    .order("user_id");
+
+  if (error) {
+    console.error("getUsers:", error);
+    return [];
+  }
+
+  return data || [];
+}
+
+/* =====================================================
+   SUPABASE - GROUPS
+===================================================== */
+
+async function saveGroup(chat) {
+  const { error } = await supabase
+    .from("groups")
+    .upsert(
+      {
+        group_id: Number(chat.id),
+        title: chat.title || "",
+        updated_at: new Date().toISOString()
+      },
+      {
+        onConflict: "group_id"
+      }
+    );
+
+  if (error) {
+    console.error("saveGroup:", error);
+  }
+}
+
+async function getGroups() {
+  const { data, error } = await supabase
+    .from("groups")
+    .select("group_id, title")
+    .order("group_id");
+
+  if (error) {
+    console.error("getGroups:", error);
+    return [];
+  }
+
+  return data || [];
+}
+
+/* =====================================================
+   SUPABASE - MESSAGE MAPPING
+===================================================== */
+
+async function saveMessageMapping({
+  adminId,
+  forwardedMessageId,
+  metadataMessageId,
+  userId
+}) {
+  const { error } = await supabase
+    .from("message_map")
+    .upsert(
+      {
+        admin_id: Number(adminId),
+        forwarded_message_id: Number(
+          forwardedMessageId
+        ),
+        metadata_message_id: metadataMessageId
+          ? Number(metadataMessageId)
+          : null,
+        user_id: Number(userId)
+      },
+      {
+        onConflict:
+          "admin_id,forwarded_message_id"
+      }
+    );
+
+  if (error) {
+    console.error(
+      "saveMessageMapping:",
+      error
+    );
+  }
+}
+
+async function findUserFromReply(
+  adminId,
+  replyMessageId
+) {
+  /*
+   * Normally the admin replies to the actual
+   * forwarded message.
+   *
+   * Metadata message is also accepted as a fallback.
+   */
+  const { data, error } = await supabase
+    .from("message_map")
+    .select("user_id")
+    .eq("admin_id", Number(adminId))
+    .or(
+      `forwarded_message_id.eq.${Number(
+        replyMessageId
+      )},metadata_message_id.eq.${Number(
+        replyMessageId
+      )}`
+    )
+    .limit(1);
+
+  if (error) {
+    console.error(
+      "findUserFromReply:",
+      error
+    );
+    return null;
+  }
+
+  if (!data || !data.length) {
+    return null;
+  }
+
+  return Number(data[0].user_id);
+}
+
+/* =====================================================
+   SUPABASE - STATS
+===================================================== */
+
+async function incrementStat(column) {
+  const allowed = [
+    "messages_received",
+    "admin_replies",
+    "broadcasts",
+    "broadcast_messages_sent",
+    "broadcast_failures"
+  ];
+
+  if (!allowed.includes(column)) {
     return;
   }
 
-  state.users.set(Number(user.id), {
-    user_id: Number(user.id),
+  /*
+   * Use RPC if available.
+   * If RPC isn't configured, we perform a read/update.
+   */
+  const { data, error } = await supabase
+    .from("bot_stats")
+    .select(column)
+    .eq("id", 1)
+    .single();
 
-    username:
-      user.username || null,
-
-    first_name:
-      user.first_name || null,
-
-    last_name:
-      user.last_name || null
-  });
-}
-
-
-function saveGroup(chat) {
-
-  if (!chat) {
+  if (error) {
+    console.error("stats read:", error);
     return;
   }
 
-  if (
-    chat.type !== "group" &&
-    chat.type !== "supergroup"
-  ) {
-    return;
+  const current = Number(data[column] || 0);
+
+  const { error: updateError } = await supabase
+    .from("bot_stats")
+    .update({
+      [column]: current + 1
+    })
+    .eq("id", 1);
+
+  if (updateError) {
+    console.error(
+      "stats update:",
+      updateError
+    );
   }
-
-  state.groups.set(Number(chat.id), {
-    chat_id: Number(chat.id),
-
-    type: chat.type,
-
-    title:
-      chat.title || ""
-  });
 }
 
+async function getStats() {
+  const { data, error } = await supabase
+    .from("bot_stats")
+    .select(
+      `
+      messages_received,
+      admin_replies,
+      broadcasts,
+      broadcast_messages_sent,
+      broadcast_failures
+      `
+    )
+    .eq("id", 1)
+    .single();
 
-// ======================================================
-// /START
-// ======================================================
+  if (error) {
+    console.error("getStats:", error);
 
-async function handleStart(message, isNewUser) {
+    return {
+      messages_received: 0,
+      admin_replies: 0,
+      broadcasts: 0,
+      broadcast_messages_sent: 0,
+      broadcast_failures: 0
+    };
+  }
 
-  const firstName =
-    message.from.first_name || "there";
+  return data;
+}
 
+/* =====================================================
+   USER PROFILE BUTTON
+===================================================== */
 
-  // ==============================
-  // NEW USER
-  // ==============================
+function getProfileButton(user) {
+  if (user.username) {
+    return {
+      inline_keyboard: [
+        [
+          {
+            text: "👤 User Profile",
+            url:
+              `https://t.me/${user.username}`
+          }
+        ]
+      ]
+    };
+  }
 
-  if (isNewUser) {
+  return {
+    inline_keyboard: [
+      [
+        {
+          text: "👤 User Profile",
+          url:
+            `tg://user?id=${user.id}`
+        }
+      ]
+    ]
+  };
+}
 
-    await telegram("sendMessage", {
+/* =====================================================
+   /START
+===================================================== */
 
-      chat_id: message.chat.id,
-
-      text:
-`🌍 𝐖𝐞𝐥𝐜𝐨𝐦𝐞 𝐭𝐨 𝐉𝐈𝐋𝐀𝐍 𝐒𝐔𝐏𝐏𝐎𝐑𝐓 𝐁𝐎𝐓
+const FIRST_START = (firstName) => `
+🌍 𝐖𝐞𝐥𝐜𝐨𝐦𝐞 𝐭𝐨 𝐉𝐈𝐋𝐀𝐍 𝐒𝐔𝐏𝐏𝐎𝐑𝐓 𝐁𝐎𝐓
 
 👋 𝐇𝐞𝐥𝐥𝐨, ${firstName}
 
@@ -187,917 +382,804 @@ async function handleStart(message, isNewUser) {
 ⏳ 𝐎𝐮𝐫 𝐬𝐮𝐩𝐩𝐨𝐫𝐭 𝐭𝐞𝐚𝐦 𝐰𝐢𝐥𝐥 𝐫𝐞𝐩𝐥𝐲 𝐡𝐞𝐫𝐞.
 
 ━━━━━━━━━━━━━━━━━━
-🛡️ 𝐘𝐨𝐮𝐫 𝐦𝐞𝐬𝐬𝐚𝐠𝐞 𝐢𝐬 𝐡𝐚𝐧𝐝𝐥𝐞𝐝 𝐛𝐲 𝐨𝐮𝐫 𝐬𝐮𝐩𝐩𝐨𝐫𝐭 𝐭𝐞𝐚𝐦.`
-    });
+🛡️ 𝐘𝐨𝐮𝐫 𝐦𝐞𝐬𝐬𝐚𝐠𝐞 𝐢𝐬 𝐡𝐚𝐧𝐝𝐥𝐞𝐝 𝐛𝐲 𝐨𝐮𝐫 𝐬𝐮𝐩𝐩𝐨𝐫𝐭 𝐭𝐞𝐚𝐦.
+`.trim();
 
-    return;
-  }
-
-
-  // ==============================
-  // EXISTING USER
-  // ==============================
-
-  await telegram("sendMessage", {
-
-    chat_id: message.chat.id,
-
-    text:
-`👋 𝐘𝐨𝐮 𝐚𝐫𝐞 𝐚𝐥𝐫𝐞𝐚𝐝𝐲 𝐚𝐧 𝐞𝐱𝐢𝐬𝐭𝐢𝐧𝐠 𝐮𝐬𝐞𝐫.
+const EXISTING_START = `
+👋 𝐘𝐨𝐮 𝐚𝐫𝐞 𝐚𝐥𝐫𝐞𝐚𝐝𝐲 𝐚𝐧 𝐞𝐱𝐢𝐬𝐭𝐢𝐧𝐠 𝐮𝐬𝐞𝐫.
 
 📩 𝐏𝐥𝐞𝐚𝐬𝐞 𝐬𝐞𝐧𝐝 𝐲𝐨𝐮𝐫 𝐪𝐮𝐞𝐫𝐲 𝐢𝐧 𝐚 𝐬𝐢𝐧𝐠𝐥𝐞 𝐦𝐞𝐬𝐬𝐚𝐠𝐞.
 
-⏳ 𝐎𝐮𝐫 𝐬𝐮𝐩𝐩𝐨𝐫𝐭 𝐭𝐞𝐚𝐦 𝐰𝐢𝐥𝐥 𝐫𝐞𝐩𝐥𝐲 𝐡𝐞𝐫𝐞.`
+⏳ 𝐎𝐮𝐫 𝐬𝐮𝐩𝐩𝐨𝐫𝐭 𝐭𝐞𝐚𝐦 𝐰𝐢𝐥𝐥 𝐫𝐞𝐩𝐥𝐲 𝐡𝐞𝐫𝐞.
+`.trim();
+
+async function handleStart(message) {
+  const user = message.from;
+
+  const exists = await userExists(user.id);
+
+  await saveUser(user);
+
+  await telegram("sendMessage", {
+    chat_id: user.id,
+    text: exists
+      ? EXISTING_START
+      : FIRST_START(
+          user.first_name || "there"
+        )
   });
 }
 
+/* =====================================================
+   TEMPORARY "MESSAGE SENT"
+===================================================== */
 
-// ======================================================
-// USER MESSAGE -> ALL ADMINS
-// ======================================================
+async function sendMessageSent(chatId) {
+  const result = await telegram(
+    "sendMessage",
+    {
+      chat_id: chatId,
+      text: "Message sent"
+    }
+  );
+
+  if (
+    !result.ok ||
+    !result.result?.message_id
+  ) {
+    return;
+  }
+
+  const confirmationId =
+    result.result.message_id;
+
+  /*
+   * Attempt deletion after 30 seconds.
+   *
+   * Note: Vercel serverless functions can terminate
+   * after the request finishes, so this is best-effort.
+   */
+  setTimeout(async () => {
+    try {
+      await telegram(
+        "deleteMessage",
+        {
+          chat_id: chatId,
+          message_id: confirmationId
+        }
+      );
+    } catch (error) {
+      console.error(
+        "Delete confirmation:",
+        error
+      );
+    }
+  }, 30000);
+}
+
+/* =====================================================
+   USER -> ADMINS
+===================================================== */
 
 async function forwardUserMessage(message) {
-
   const user = message.from;
 
+  await saveUser(user);
+  await incrementStat(
+    "messages_received"
+  );
 
+  /*
+   * IMPORTANT:
+   *
+   * Native forwardMessage is used here.
+   * This preserves Telegram custom emojis,
+   * entities, media and original message format.
+   */
   for (const adminId of ADMIN_IDS) {
-
     try {
-
-      // ==========================================
-      // FIRST:
-      // Send/forward the actual user's message
-      // ==========================================
-
       const forwarded =
-        await telegram("forwardMessage", {
+        await telegram(
+          "forwardMessage",
+          {
+            chat_id: adminId,
+            from_chat_id: user.id,
+            message_id:
+              message.message_id
+          }
+        );
 
-          chat_id: adminId,
-
-          from_chat_id:
-            message.chat.id,
-
-          message_id:
-            message.message_id
-        });
-
-
-      if (!forwarded.ok) {
+      if (
+        !forwarded.ok ||
+        !forwarded.result
+      ) {
         continue;
       }
-
 
       const forwardedMessageId =
         forwarded.result.message_id;
 
+      /*
+       * FIRST NAME ONLY.
+       *
+       * Username is deliberately NOT used here.
+       */
+      const firstName =
+        user.first_name || "User";
 
-      // ==========================================
-      // Save mapping for admin replies
-      // ==========================================
+      const metadataText =
+        `👆 Message sent by ${firstName} ` +
+        `[${user.id}] #id${user.id}\n` +
+        `👉 To answer, reply to this message.`;
 
-      state.messageMap.set(
-        `${adminId}:${forwardedMessageId}`,
-        Number(user.id)
-      );
+      /*
+       * Metadata is a separate message attached
+       * underneath the actual forwarded message.
+       */
+      const metadata =
+        await telegram(
+          "sendMessage",
+          {
+            chat_id: adminId,
+            text: metadataText,
+            reply_to_message_id:
+              forwardedMessageId,
+            reply_markup:
+              getProfileButton(user)
+          }
+        );
 
+      const metadataMessageId =
+        metadata.ok
+          ? metadata.result.message_id
+          : null;
 
-      // ==========================================
-      // PROFILE URL
-      // ==========================================
-
-      const profileUrl =
-        user.username
-          ? `https://t.me/${user.username}`
-          : `tg://user?id=${user.id}`;
-
-
-      // ==========================================
-      // SECOND:
-      // Send support information UNDER the
-      // actual forwarded message.
-      //
-      // It replies to the forwarded message,
-      // visually connecting them.
-      // ==========================================
-
-      await telegram("sendMessage", {
-
-        chat_id: adminId,
-
-        reply_to_message_id:
-          forwardedMessageId,
-
-        text:
-`👆 Message sent by ${getUserName(user)} [${user.id}] #id${user.id}
-👉 To answer, reply to this message.`,
-
-        reply_markup: {
-
-          inline_keyboard: [
-
-            [
-              {
-                text:
-                  "👤 User Profile",
-
-                url:
-                  profileUrl
-              }
-            ]
-
-          ]
-        }
+      /*
+       * CRITICAL:
+       *
+       * forwarded message ID -> exact user ID
+       *
+       * This prevents bulk/multiple users from
+       * getting mixed up.
+       */
+      await saveMessageMapping({
+        adminId,
+        forwardedMessageId,
+        metadataMessageId,
+        userId: user.id
       });
 
-    }
-
-    catch (error) {
-
+    } catch (error) {
       console.error(
-        "FORWARD ERROR:",
+        "Forward user message:",
         error
       );
-
     }
   }
+
+  await sendMessageSent(user.id);
 }
 
-
-// ======================================================
-// ADMIN REPLY -> USER
-// ======================================================
+/* =====================================================
+   ADMIN -> USER
+===================================================== */
 
 async function handleAdminReply(message) {
+  const adminId =
+    Number(message.from.id);
 
-  const repliedMessage =
-    message.reply_to_message;
-
-
-  if (!repliedMessage) {
+  if (!isAdmin(adminId)) {
     return false;
   }
 
-
-  // ==========================================
-  // TRY OUR SAVED MAPPING FIRST
-  // ==========================================
-
-  const mapKey =
-    `${message.chat.id}:${repliedMessage.message_id}`;
-
-
-  let userId =
-    state.messageMap.get(mapKey);
-
-
-  // ==========================================
-  // FALLBACK:
-  // Telegram forwarded origin
-  // ==========================================
-
-  if (!userId) {
-
-    const origin =
-      repliedMessage.forward_origin;
-
-
-    if (
-      origin?.type === "user" &&
-      origin?.sender_user?.id
-    ) {
-
-      userId =
-        Number(
-          origin.sender_user.id
-        );
-    }
+  if (!message.reply_to_message) {
+    return false;
   }
 
+  const repliedMessageId =
+    message.reply_to_message.message_id;
+
+  /*
+   * Find EXACT user associated with
+   * the message the admin replied to.
+   */
+  const userId =
+    await findUserFromReply(
+      adminId,
+      repliedMessageId
+    );
 
   if (!userId) {
     return false;
   }
 
+  /*
+   * Send ONLY the admin's actual message
+   * to the user.
+   *
+   * copyMessage supports text, media,
+   * formatting and Telegram entities.
+   */
+  const copied =
+    await telegram(
+      "copyMessage",
+      {
+        chat_id: userId,
+        from_chat_id: adminId,
+        message_id:
+          message.message_id
+      }
+    );
 
-  // ==========================================
-  // SEND ADMIN'S ACTUAL REPLY TO USER
-  // ==========================================
-
-  const result =
-    await telegram("copyMessage", {
-
-      chat_id: userId,
-
-      from_chat_id:
-        message.chat.id,
-
-      message_id:
-        message.message_id
-    });
-
-
-  if (!result.ok) {
-    return false;
+  if (!copied.ok) {
+    return true;
   }
 
+  await incrementStat(
+    "admin_replies"
+  );
 
-  state.adminReplies++;
+  /*
+   * Separate admin marker.
+   */
+  const marker =
+    `👨‍💻 Replied by ` +
+    `${getAdminName(adminId)} ` +
+    `[${adminId}]`;
 
-
-  // ==========================================
-  // SHOW ALL ADMINS WHO REPLIED
-  // ==========================================
-
-  const repliedBy =
-    `👨‍💻 Replied by ${getAdminName(message.from)} [${message.from.id}]`;
-
-
-  for (const adminId of ADMIN_IDS) {
-
+  for (const targetAdmin of ADMIN_IDS) {
     try {
-
-      await telegram("sendMessage", {
-
-        chat_id: adminId,
-
-        text:
-          repliedBy
-      });
-
-    }
-
-    catch (error) {
-
+      await telegram(
+        "sendMessage",
+        {
+          chat_id: targetAdmin,
+          text: marker
+        }
+      );
+    } catch (error) {
       console.error(
-        "ADMIN RESPONSE NOTIFICATION ERROR:",
+        "Reply marker:",
         error
       );
-
     }
   }
-
 
   return true;
 }
 
+/* =====================================================
+   BROADCAST
+===================================================== */
 
-// ======================================================
-// /BOTSTATS
-// ======================================================
+async function sendBroadcastText(
+  text
+) {
+  const users = await getUsers();
+  const groups = await getGroups();
 
-async function handleBotStats(message) {
-
-  // ==============================
-  // ADMIN ONLY
-  // ==============================
-
-  if (!isAdmin(message.from.id)) {
-
-    await telegram("sendMessage", {
-
-      chat_id:
-        message.chat.id,
-
-      text:
-        "❌ You are not authorized to use this command."
-    });
-
-    return;
-  }
-
-
-  await telegram("sendMessage", {
-
-    chat_id:
-      message.chat.id,
-
-    text:
-`📊 𝐁𝐎𝐓 𝐒𝐓𝐀𝐓𝐒
-
-👤 Users: ${state.users.size}
-👥 Groups: ${state.groups.size}
-
-📨 Messages received: ${state.messages}
-💬 Admin replies: ${state.adminReplies}
-
-📢 Broadcasts: ${state.broadcasts}
-📤 Broadcast messages sent: ${state.broadcastSent}
-❌ Broadcast failures: ${state.broadcastFailed}
-
-👨‍💻 Admins: ${ADMIN_IDS.length}`
-  });
-}
-
-
-// ======================================================
-// /BROADCAST
-// ======================================================
-
-async function handleBroadcast(message) {
-
-  // ==============================
-  // ADMIN ONLY
-  // ==============================
-
-  if (!isAdmin(message.from.id)) {
-
-    await telegram("sendMessage", {
-
-      chat_id:
-        message.chat.id,
-
-      text:
-        "❌ You are not the owner of this bot."
-    });
-
-    return;
-  }
-
-
-  let success = 0;
-
+  let userSent = 0;
+  let groupSent = 0;
   let failed = 0;
 
-  let groupSent = 0;
-
-
-  // ==================================================
-  // REPLY BROADCAST
-  // ==================================================
-
-  if (message.reply_to_message) {
-
-    const source =
-      message.reply_to_message;
-
-
-    // ==============================
-    // USERS
-    // ==============================
-
-    for (
-      const user
-      of state.users.values()
-    ) {
-
-      try {
-
-        const result =
-          await telegram(
-            "forwardMessage",
-            {
-
-              chat_id:
-                user.user_id,
-
-              from_chat_id:
-                source.chat.id,
-
-              message_id:
-                source.message_id
-            }
-          );
-
-
-        if (result.ok) {
-
-          success++;
-
-        } else {
-
-          failed++;
-
-        }
-
-      }
-
-      catch (error) {
-
-        console.error(
-          "USER BROADCAST ERROR:",
-          error
+  for (const user of users) {
+    try {
+      const result =
+        await telegram(
+          "sendMessage",
+          {
+            chat_id:
+              Number(user.user_id),
+            text
+          }
         );
 
-        failed++;
-      }
-    }
-
-
-    // ==============================
-    // GROUPS
-    // ==============================
-
-    for (
-      const chat
-      of state.groups.values()
-    ) {
-
-      try {
-
-        const result =
-          await telegram(
-            "forwardMessage",
-            {
-
-              chat_id:
-                chat.chat_id,
-
-              from_chat_id:
-                source.chat.id,
-
-              message_id:
-                source.message_id
-            }
-          );
-
-
-        if (result.ok) {
-
-          groupSent++;
-
-        } else {
-
-          failed++;
-
-        }
-
-      }
-
-      catch (error) {
-
-        console.error(
-          "GROUP BROADCAST ERROR:",
-          error
+      if (result.ok) {
+        userSent++;
+        await incrementStat(
+          "broadcast_messages_sent"
         );
-
+      } else {
         failed++;
+        await incrementStat(
+          "broadcast_failures"
+        );
       }
+    } catch {
+      failed++;
+      await incrementStat(
+        "broadcast_failures"
+      );
     }
-
   }
 
+  for (const group of groups) {
+    try {
+      const result =
+        await telegram(
+          "sendMessage",
+          {
+            chat_id:
+              Number(group.group_id),
+            text
+          }
+        );
 
-  // ==================================================
-  // TEXT BROADCAST
-  // ==================================================
+      if (result.ok) {
+        groupSent++;
+        await incrementStat(
+          "broadcast_messages_sent"
+        );
+      } else {
+        failed++;
+        await incrementStat(
+          "broadcast_failures"
+        );
+      }
+    } catch {
+      failed++;
+      await incrementStat(
+        "broadcast_failures"
+      );
+    }
+  }
 
-  else {
+  await incrementStat(
+    "broadcasts"
+  );
 
-    const text =
-      (message.text || "")
-        .split(/\s+/)
-        .slice(1)
-        .join(" ")
-        .trim();
+  return {
+    userSent,
+    groupSent,
+    failed
+  };
+}
 
+async function forwardBroadcast(
+  adminId,
+  sourceMessageId
+) {
+  const users = await getUsers();
+  const groups = await getGroups();
 
-    if (!text) {
+  let userSent = 0;
+  let groupSent = 0;
+  let failed = 0;
 
-      await telegram(
-        "sendMessage",
-        {
+  for (const user of users) {
+    try {
+      const result =
+        await telegram(
+          "forwardMessage",
+          {
+            chat_id:
+              Number(user.user_id),
+            from_chat_id:
+              adminId,
+            message_id:
+              sourceMessageId
+          }
+        );
 
-          chat_id:
-            message.chat.id,
+      if (result.ok) {
+        userSent++;
+        await incrementStat(
+          "broadcast_messages_sent"
+        );
+      } else {
+        failed++;
+        await incrementStat(
+          "broadcast_failures"
+        );
+      }
+    } catch {
+      failed++;
+      await incrementStat(
+        "broadcast_failures"
+      );
+    }
+  }
 
-          text:
-`Usage:
+  for (const group of groups) {
+    try {
+      const result =
+        await telegram(
+          "forwardMessage",
+          {
+            chat_id:
+              Number(group.group_id),
+            from_chat_id:
+              adminId,
+            message_id:
+              sourceMessageId
+          }
+        );
 
-/broadcast Message
+      if (result.ok) {
+        groupSent++;
+        await incrementStat(
+          "broadcast_messages_sent"
+        );
+      } else {
+        failed++;
+        await incrementStat(
+          "broadcast_failures"
+        );
+      }
+    } catch {
+      failed++;
+      await incrementStat(
+        "broadcast_failures"
+      );
+    }
+  }
 
-OR
+  await incrementStat(
+    "broadcasts"
+  );
 
-Reply to any message with /broadcast`
-        }
+  return {
+    userSent,
+    groupSent,
+    failed
+  };
+}
+
+async function handleBroadcast(
+  message
+) {
+  const adminId =
+    Number(message.from.id);
+
+  if (!isAdmin(adminId)) {
+    await telegram(
+      "sendMessage",
+      {
+        chat_id: adminId,
+        text:
+          "❌ You are not the owner of this bot."
+      }
+    );
+
+    return;
+  }
+
+  /*
+   * MODE A:
+   *
+   * Admin replies to a message and types
+   * /broadcast
+   */
+  if (message.reply_to_message) {
+    const result =
+      await forwardBroadcast(
+        adminId,
+        message.reply_to_message.message_id
       );
 
-      return;
-    }
-
-
-    // ==============================
-    // USERS
-    // ==============================
-
-    for (
-      const user
-      of state.users.values()
-    ) {
-
-      try {
-
-        const result =
-          await telegram(
-            "sendMessage",
-            {
-
-              chat_id:
-                user.user_id,
-
-              text:
-                text
-            }
-          );
-
-
-        if (result.ok) {
-
-          success++;
-
-        } else {
-
-          failed++;
-
-        }
-
+    await telegram(
+      "sendMessage",
+      {
+        chat_id: adminId,
+        text:
+          `📢 Broadcast Completed\n\n` +
+          `👤 Users : ${result.userSent}\n` +
+          `👥 Groups : ${result.groupSent}\n` +
+          `❌ Failed : ${result.failed}`
       }
+    );
 
-      catch (error) {
-
-        console.error(
-          "USER BROADCAST ERROR:",
-          error
-        );
-
-        failed++;
-      }
-    }
-
-
-    // ==============================
-    // GROUPS
-    // ==============================
-
-    for (
-      const chat
-      of state.groups.values()
-    ) {
-
-      try {
-
-        const result =
-          await telegram(
-            "sendMessage",
-            {
-
-              chat_id:
-                chat.chat_id,
-
-              text:
-                text
-            }
-          );
-
-
-        if (result.ok) {
-
-          groupSent++;
-
-        } else {
-
-          failed++;
-
-        }
-
-      }
-
-      catch (error) {
-
-        console.error(
-          "GROUP BROADCAST ERROR:",
-          error
-        );
-
-        failed++;
-      }
-    }
+    return;
   }
 
+  /*
+   * MODE B:
+   *
+   * /broadcast Hello everyone
+   */
+  const text =
+    (message.text || "")
+      .replace(
+        /^\/broadcast(?:@\w+)?\s*/i,
+        ""
+      )
+      .trim();
 
-  // ==================================================
-  // SAVE BROADCAST STATS
-  // ==================================================
+  if (!text) {
+    await telegram(
+      "sendMessage",
+      {
+        chat_id: adminId,
+        text:
+          "Usage:\n\n" +
+          "/broadcast Your message\n\n" +
+          "or reply to a message with /broadcast"
+      }
+    );
 
-  state.broadcasts++;
+    return;
+  }
 
-  state.broadcastSent +=
-    success + groupSent;
-
-  state.broadcastFailed +=
-    failed;
-
-
-  // ==================================================
-  // RESULT
-  // ==================================================
+  const result =
+    await sendBroadcastText(text);
 
   await telegram(
     "sendMessage",
     {
-
-      chat_id:
-        message.chat.id,
-
+      chat_id: adminId,
       text:
-`📢 𝐁𝐫𝐨𝐚𝐝𝐜𝐚𝐬𝐭 𝐂𝐨𝐦𝐩𝐥𝐞𝐭𝐞𝐝
-
-👤 Users : ${success}
-👥 Groups : ${groupSent}
-❌ Failed : ${failed}`
+        `📢 Broadcast Completed\n\n` +
+        `👤 Users : ${result.userSent}\n` +
+        `👥 Groups : ${result.groupSent}\n` +
+        `❌ Failed : ${result.failed}`
     }
   );
 }
 
+/* =====================================================
+   /BOTSTATS
+===================================================== */
 
-// ======================================================
-// PROCESS TELEGRAM UPDATE
-// ======================================================
-
-async function processUpdate(update) {
-
-  const message =
-    update.message;
-
-
-  if (!message) {
-    return;
-  }
-
-
-  // ==================================================
-  // GROUP / SUPERGROUP
-  // ==================================================
-  //
-  // Save group for broadcasts.
-  //
-  // IMPORTANT:
-  // NOTHING FROM GROUPS IS FORWARDED TO ADMINS.
-  //
-  // ==================================================
-
-  if (
-    message.chat.type === "group" ||
-    message.chat.type === "supergroup"
-  ) {
-
-    saveGroup(
-      message.chat
-    );
-
-    return;
-  }
-
-
-  // ==================================================
-  // CHANNELS / OTHER TYPES
-  // ==================================================
-
-  if (
-    message.chat.type !== "private"
-  ) {
-
-    return;
-  }
-
-
-  if (!message.from) {
-    return;
-  }
-
-
-  const userId =
+async function handleBotStats(
+  message
+) {
+  const adminId =
     Number(message.from.id);
 
-
-  // ==================================================
-  // ADMIN
-  // ==================================================
-
-  if (isAdmin(userId)) {
-
-
-    // ==============================
-    // /START
-    // ==============================
-
-    if (
-      message.text === "/start"
-    ) {
-
-      const isNew =
-        !state.users.has(userId);
-
-      saveUser(
-        message.from
-      );
-
-      await handleStart(
-        message,
-        isNew
-      );
-
-      return;
-    }
-
-
-    // ==============================
-    // /BOTSTATS
-    // ==============================
-
-    if (
-      message.text === "/botstats"
-    ) {
-
-      await handleBotStats(
-        message
-      );
-
-      return;
-    }
-
-
-    // ==============================
-    // /BROADCAST
-    // ==============================
-
-    if (
-      message.text === "/broadcast" ||
-      message.text?.startsWith(
-        "/broadcast "
-      )
-    ) {
-
-      await handleBroadcast(
-        message
-      );
-
-      return;
-    }
-
-
-    // ==============================
-    // ADMIN REPLY
-    // ==============================
-
-    if (
-      message.reply_to_message
-    ) {
-
-      const handled =
-        await handleAdminReply(
-          message
-        );
-
-
-      if (handled) {
-        return;
+  if (!isAdmin(adminId)) {
+    await telegram(
+      "sendMessage",
+      {
+        chat_id: adminId,
+        text:
+          "❌ You are not the owner of this bot."
       }
-    }
-
-
-    // Other admin messages ignored.
-
-    return;
-  }
-
-
-  // ==================================================
-  // NORMAL USER
-  // ==================================================
-
-  const isNewUser =
-    !state.users.has(userId);
-
-
-  saveUser(
-    message.from
-  );
-
-
-  // ==============================
-  // /START
-  // ==============================
-
-  if (
-    message.text === "/start"
-  ) {
-
-    await handleStart(
-      message,
-      isNewUser
     );
 
     return;
   }
 
+  const { count: userCount } =
+    await supabase
+      .from("users")
+      .select(
+        "user_id",
+        {
+          count: "exact",
+          head: true
+        }
+      );
 
-  // ==================================================
-  // USER SUPPORT MESSAGE
-  // ==================================================
-  //
-  // Every DM is forwarded individually.
-  //
-  // ==================================================
+  const { count: groupCount } =
+    await supabase
+      .from("groups")
+      .select(
+        "group_id",
+        {
+          count: "exact",
+          head: true
+        }
+      );
 
-  state.messages++;
+  const stats =
+    await getStats();
 
+  const text =
+    `📊 𝐁𝐎𝐓 𝐒𝐓𝐀𝐓𝐒\n\n` +
+    `👤 Users: ${userCount || 0}\n` +
+    `👥 Groups: ${groupCount || 0}\n\n` +
+    `📨 Messages received: ${stats.messages_received}\n` +
+    `💬 Admin replies: ${stats.admin_replies}\n\n` +
+    `📢 Broadcasts: ${stats.broadcasts}\n` +
+    `📤 Broadcast messages sent: ${stats.broadcast_messages_sent}\n` +
+    `❌ Broadcast failures: ${stats.broadcast_failures}\n\n` +
+    `👨‍💻 Admins: ${ADMIN_IDS.length}`;
 
-  await forwardUserMessage(
-    message
+  await telegram(
+    "sendMessage",
+    {
+      chat_id: adminId,
+      text
+    }
   );
 }
 
+/* =====================================================
+   PROCESS UPDATE
+===================================================== */
 
-// ======================================================
-// VERCEL WEBHOOK
-// ======================================================
-
-export default async function handler(
-  req,
-  res
-) {
-
-  try {
-
-
-    // ==================================================
-    // BROWSER TEST
-    // ==================================================
-
-    if (
-      req.method === "GET"
-    ) {
-
-      return res
-        .status(200)
-        .json({
-
-          ok: true,
-
-          message:
-            "Support bot webhook is running."
-        });
-    }
-
-
-    // ==================================================
-    // TELEGRAM ONLY USES POST
-    // ==================================================
-
-    if (
-      req.method !== "POST"
-    ) {
-
-      return res
-        .status(405)
-        .json({
-
-          ok: false,
-
-          error:
-            "Method not allowed"
-        });
-    }
-
-
-    // ==================================================
-    // PROCESS UPDATE
-    // ==================================================
-
-    await processUpdate(
-      req.body
-    );
-
-
-    return res
-      .status(200)
-      .json({
-
-        ok: true
-      });
-
+async function processUpdate(update) {
+  if (!update?.message) {
+    return;
   }
 
-  catch (error) {
+  const message = update.message;
+  const chat = message.chat;
+
+  /*
+   * GROUPS / SUPERGROUPS
+   *
+   * Register them for /broadcast,
+   * but NEVER forward their messages
+   * to support admins.
+   */
+  if (
+    chat.type === "group" ||
+    chat.type === "supergroup"
+  ) {
+    await saveGroup(chat);
+    return;
+  }
+
+  /*
+   * CHANNELS
+   *
+   * Completely ignore.
+   */
+  if (chat.type === "channel") {
+    return;
+  }
+
+  /*
+   * SUPPORT ONLY WORKS IN PRIVATE CHATS.
+   */
+  if (chat.type !== "private") {
+    return;
+  }
+
+  const senderId = Number(message.from.id);
+
+  /* ===================================================
+     /start
+  =================================================== */
+
+  if (
+    message.text &&
+    /^\/start(?:@\w+)?$/i.test(
+      message.text.trim()
+    )
+  ) {
+    await handleStart(message);
+    return;
+  }
+
+  /* ===================================================
+     /botstats
+  =================================================== */
+
+  if (
+    message.text &&
+    /^\/botstats(?:@\w+)?$/i.test(
+      message.text.trim()
+    )
+  ) {
+    await handleBotStats(message);
+    return;
+  }
+
+  /* ===================================================
+     /broadcast
+  =================================================== */
+
+  if (
+    message.text &&
+    /^\/broadcast(?:@\w+)?(?:\s|$)/i.test(
+      message.text
+    )
+  ) {
+    await handleBroadcast(message);
+    return;
+  }
+
+  /* ===================================================
+     ADMIN REPLY TO USER MESSAGE
+  =================================================== */
+
+  /*
+   * Admin must reply to the actual forwarded
+   * user message.
+   *
+   * The database finds:
+   *
+   * forwarded_message_id
+   *          ↓
+   *       user_id
+   *
+   * Therefore multiple users/messages cannot
+   * get mixed together.
+   */
+  if (
+    isAdmin(senderId) &&
+    message.reply_to_message
+  ) {
+    const handled =
+      await handleAdminReply(message);
+
+    if (handled) {
+      return;
+    }
+  }
+
+  /* ===================================================
+     ADMIN NORMAL MESSAGE
+  =================================================== */
+
+  /*
+   * Don't treat an admin's ordinary private
+   * message as a support request.
+   */
+  if (isAdmin(senderId)) {
+    return;
+  }
+
+  /* ===================================================
+     USER MESSAGE
+  =================================================== */
+
+  /*
+   * Every private user message is forwarded
+   * individually to every admin.
+   *
+   * Native forwardMessage is used inside
+   * forwardUserMessage(), preserving custom
+   * emojis and Telegram entities.
+   */
+  await forwardUserMessage(message);
+}
+
+
+/* =====================================================
+   VERCEL WEBHOOK HANDLER
+===================================================== */
+
+export default async function handler(req, res) {
+  try {
+
+    /*
+     * GET
+     *
+     * Used to test whether the webhook endpoint
+     * is alive.
+     */
+    if (req.method === "GET") {
+      return res.status(200).json({
+        ok: true
+      });
+    }
+
+    /*
+     * Telegram uses POST requests.
+     */
+    if (req.method !== "POST") {
+      return res.status(200).json({
+        ok: true
+      });
+    }
+
+    /*
+     * Process Telegram update.
+     */
+    await processUpdate(req.body);
+
+    /*
+     * Telegram expects a successful response.
+     */
+    return res.status(200).json({
+      ok: true
+    });
+
+  } catch (error) {
 
     console.error(
-      "WEBHOOK ERROR:",
+      "Webhook error:",
       error
     );
 
-
-    // Return 200 so Telegram doesn't repeatedly
-    // resend a broken update forever.
-
-    return res
-      .status(200)
-      .json({
-
-        ok: false,
-
-        error:
-          error.message
-      });
+    /*
+     * Return HTTP 200 so Telegram does not
+     * repeatedly retry the same update.
+     */
+    return res.status(200).json({
+      ok: true
+    });
   }
-                        }
+}
